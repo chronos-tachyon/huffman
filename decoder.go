@@ -1,10 +1,12 @@
 package huffman
 
 import (
-	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // Decoder implements a decoder for canonical Huffman codes.
@@ -13,6 +15,16 @@ type Decoder struct {
 	sizes   []byte
 	minSize byte
 	maxSize byte
+}
+
+// NewDecoder is a convenience function that allocates a new Decoder and calls
+// Init on it.  If Init returns an error, NewDecoder panics.
+func NewDecoder(sizes []byte) *Decoder {
+	d := new(Decoder)
+	if err := d.Init(sizes); err != nil {
+		panic(err)
+	}
+	return d
 }
 
 // Init initializes this Decoder.  The argument consists of zero or more bit
@@ -106,6 +118,12 @@ func (d *Decoder) Init(sizes []byte) error {
 	return nil
 }
 
+// InitFromEncoder initializes this Decoder to be the mirror of the given
+// Encoder.
+func (d *Decoder) InitFromEncoder(e Encoder) error {
+	return d.Init(e.SizeBySymbol())
+}
+
 // Decode attempts to decode a Huffman code into a Symbol.
 //
 // If the Decode is completely successful, symbol >= 0 and minSize == maxSize.
@@ -135,6 +153,11 @@ func (d Decoder) MaxSize() byte {
 	return d.maxSize
 }
 
+// NumSymbols returns the total number of symbols in the code's alphabet.
+func (d Decoder) NumSymbols() uint {
+	return uint(len(d.sizes))
+}
+
 // MaxSymbol is the last Symbol in the code's alphabet.
 //
 // (The first Symbol in the code's alphabet is always 0.)
@@ -149,10 +172,25 @@ func (d Decoder) SizeBySymbol() []byte {
 	return d.sizes
 }
 
-// Dump writes a programmer-readable debugging dump of the Decoder's current
-// state to the given writer.
+// Encoder returns a new Encoder which mirrors this Decoder.
+func (d Decoder) Encoder() *Encoder {
+	e := new(Encoder)
+	if err := e.InitFromDecoder(d); err != nil {
+		panic(err)
+	}
+	return e
+}
+
+// Dump writes DebugString() to the given writer.
 func (d Decoder) Dump(w io.Writer) (int64, error) {
-	var buf bytes.Buffer
+	r := strings.NewReader(d.DebugString())
+	return r.WriteTo(w)
+}
+
+// DebugString returns a programmer-readable debugging string of the Decoder's
+// current state.
+func (d Decoder) DebugString() string {
+	var buf strings.Builder
 	buf.WriteString("Decoder{\n")
 	fmt.Fprintf(&buf, "\tMinSize() = %d\n", d.minSize)
 	fmt.Fprintf(&buf, "\tMaxSize() = %d\n", d.maxSize)
@@ -166,7 +204,61 @@ func (d Decoder) Dump(w io.Writer) (int64, error) {
 		fmt.Fprintf(&buf, "\tDecode(%s) = {%d, %d, %d}\n", hc, dd.symbol, dd.minSize, dd.maxSize)
 	}
 	buf.WriteString("}\n")
-	return buf.WriteTo(w)
+	return buf.String()
+}
+
+// GoString returns a Go expression that would reconstruct this Decoder.
+func (d Decoder) GoString() string {
+	var buf strings.Builder
+	buf.WriteString("NewDecoder([]byte{")
+	for index, size := range d.SizeBySymbol() {
+		if index != 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(strconv.FormatUint(uint64(size), 10))
+	}
+	buf.WriteString("})")
+	return buf.String()
+}
+
+// String returns a brief string representation.
+func (d Decoder) String() string {
+	return fmt.Sprintf(
+		"(Huffman decoder with %d symbols, with coded lengths of %d .. %d bits)",
+		len(d.sizes),
+		d.minSize,
+		d.maxSize,
+	)
+}
+
+// MarshalJSON renders this Decoder as JSON data.
+func (d Decoder) MarshalJSON() ([]byte, error) {
+	length := uint(len(d.sizes))
+	arr := make([]uint, length)
+	for i := uint(0); i < length; i++ {
+		arr[i] = uint(d.sizes[i])
+	}
+	return json.Marshal(arr)
+}
+
+// UnmarshalJSON initializes this Decoder from JSON data.
+func (d *Decoder) UnmarshalJSON(raw []byte) error {
+	var arr []uint
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return err
+	}
+
+	length := uint(len(arr))
+	sizes := make([]byte, length)
+	for i := uint(0); i < length; i++ {
+		size := arr[i]
+		if size > maxBitsPerCode {
+			return fmt.Errorf("invalid bit length while constructing Huffman tree: got %d, max %d", size, maxBitsPerCode)
+		}
+		sizes[i] = byte(size)
+	}
+
+	return d.Init(sizes)
 }
 
 type decoderData struct {

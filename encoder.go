@@ -1,12 +1,14 @@
 package huffman
 
 import (
-	"bytes"
 	"container/heap"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/chronos-tachyon/assert"
 )
@@ -18,6 +20,25 @@ type Encoder struct {
 	maxSize byte
 }
 
+// NewEncoder is a convenience function that allocates a new Encoder and calls
+// Init on it.
+func NewEncoder(numSymbols int, frequencies []uint32) *Encoder {
+	e := new(Encoder)
+	e.Init(numSymbols, frequencies)
+	return e
+}
+
+// NewEncoderFromSizes is a convenience function that allocates a new Encoder
+// and calls InitFromSizes on it.  If InitFromSizes returns an error,
+// NewEncoderFromSizes panics.
+func NewEncoderFromSizes(sizes []byte) *Encoder {
+	e := new(Encoder)
+	if err := e.InitFromSizes(sizes); err != nil {
+		panic(err)
+	}
+	return e
+}
+
 // Init initializes this Encoder.  The first argument tells Init how many
 // Symbols are in this code's alphabet, and the second argument lists the
 // frequency (i.e. number of occurrences) for each Symbol in the code, one for
@@ -25,6 +46,7 @@ type Encoder struct {
 // have a frequency of 0.
 //
 func (e *Encoder) Init(numSymbols int, frequencies []uint32) {
+	assert.Assertf(numSymbols >= 1, "numSymbols %d < 1", numSymbols)
 	assert.Assertf(numSymbols <= int(MaxSymbol), "numSymbols %d > MaxSymbol %d", numSymbols, int(MaxSymbol))
 	assert.Assertf(numSymbols >= len(frequencies), "numSymbols %d < len(frequencies) %d", numSymbols, len(frequencies))
 
@@ -46,7 +68,7 @@ func (e *Encoder) Init(numSymbols int, frequencies []uint32) {
 		}
 	} else {
 		firstPass(codes, nodes, &minSize, &maxSize)
-		secondPass(codes)
+		_ = secondPass(codes)
 	}
 
 	*e = Encoder{
@@ -54,6 +76,52 @@ func (e *Encoder) Init(numSymbols int, frequencies []uint32) {
 		minSize: minSize,
 		maxSize: maxSize,
 	}
+}
+
+// InitFromSizes initializes this Encoder from a list of bit lengths, one for
+// each symbol in the code.  See Decoder.Init for more details.
+func (e *Encoder) InitFromSizes(sizes []byte) error {
+	numSymbols := Symbol(len(sizes))
+	codes := make([]Code, numSymbols)
+
+	var minSize, maxSize byte
+	var hasMinMax bool
+
+	for symbol := Symbol(0); symbol < numSymbols; symbol++ {
+		size := sizes[symbol]
+		if size == 0 {
+			continue
+		}
+
+		if !hasMinMax {
+			hasMinMax = true
+			minSize = size
+			maxSize = size
+		} else if minSize > size {
+			minSize = size
+		} else if maxSize < size {
+			maxSize = size
+		}
+
+		codes[symbol].Size = sizes[symbol]
+	}
+
+	if err := secondPass(codes); err != nil {
+		return err
+	}
+
+	*e = Encoder{
+		codes:   codes,
+		minSize: minSize,
+		maxSize: maxSize,
+	}
+	return nil
+}
+
+// InitFromDecoder initializes this Encoder to be the mirror of the given
+// Decoder.
+func (e *Encoder) InitFromDecoder(d Decoder) error {
+	return e.InitFromSizes(d.SizeBySymbol())
 }
 
 // Encode encodes a Symbol into a Huffman-coded bit string.
@@ -69,6 +137,11 @@ func (e Encoder) MinSize() byte {
 // MaxSize is the bit length of the longest legal code.
 func (e Encoder) MaxSize() byte {
 	return e.maxSize
+}
+
+// NumSymbols returns the total number of symbols in the code's alphabet.
+func (e Encoder) NumSymbols() uint {
+	return uint(len(e.codes))
 }
 
 // MaxSymbol is the last Symbol in the code's alphabet.
@@ -93,10 +166,25 @@ func (e Encoder) SizeBySymbol() []byte {
 	return out
 }
 
-// Dump writes a programmer-readable debugging dump of the Encoder's current
-// state to the given writer.
+// Decoder returns a new Decoder which mirrors this Encoder.
+func (e Encoder) Decoder() *Decoder {
+	d := new(Decoder)
+	if err := d.InitFromEncoder(e); err != nil {
+		panic(err)
+	}
+	return d
+}
+
+// Dump writes DebugString() to the given writer.
 func (e Encoder) Dump(w io.Writer) (int64, error) {
-	var buf bytes.Buffer
+	r := strings.NewReader(e.DebugString())
+	return r.WriteTo(w)
+}
+
+// DebugString returns a programmer-readable debugging string of the Encoder's
+// current state.
+func (e Encoder) DebugString() string {
+	var buf strings.Builder
 	buf.WriteString("Encoder{\n")
 	fmt.Fprintf(&buf, "\tMinSize() = %d\n", e.minSize)
 	fmt.Fprintf(&buf, "\tMaxSize() = %d\n", e.maxSize)
@@ -110,7 +198,61 @@ func (e Encoder) Dump(w io.Writer) (int64, error) {
 		}
 	}
 	buf.WriteString("}\n")
-	return buf.WriteTo(w)
+	return buf.String()
+}
+
+// GoString returns a Go expression that would reconstruct this Encoder.
+func (e Encoder) GoString() string {
+	var buf strings.Builder
+	buf.WriteString("NewEncoderFromSizes([]byte{")
+	for index, hc := range e.codes {
+		if index != 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(strconv.FormatUint(uint64(hc.Size), 10))
+	}
+	buf.WriteString("})")
+	return buf.String()
+}
+
+// String returns a brief string representation.
+func (e Encoder) String() string {
+	return fmt.Sprintf(
+		"(Huffman encoder with %d symbols, with coded lengths of %d .. %d bits)",
+		len(e.codes),
+		e.minSize,
+		e.maxSize,
+	)
+}
+
+// MarshalJSON renders this Encoder as JSON data.
+func (e Encoder) MarshalJSON() ([]byte, error) {
+	length := uint(len(e.codes))
+	arr := make([]uint, length)
+	for i := uint(0); i < length; i++ {
+		arr[i] = uint(e.codes[i].Size)
+	}
+	return json.Marshal(arr)
+}
+
+// UnmarshalJSON initializes this Encoder from JSON data.
+func (e *Encoder) UnmarshalJSON(raw []byte) error {
+	var arr []uint
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return err
+	}
+
+	length := uint(len(arr))
+	sizes := make([]byte, length)
+	for i := uint(0); i < length; i++ {
+		size := arr[i]
+		if size > maxBitsPerCode {
+			return fmt.Errorf("invalid bit length while constructing Huffman tree: got %d, max %d", size, maxBitsPerCode)
+		}
+		sizes[i] = byte(size)
+	}
+
+	return e.InitFromSizes(sizes)
 }
 
 // firstPass computes the "first pass" of Huffman code assignment, which is to
@@ -257,17 +399,23 @@ func firstPass(codes []Code, nodes []symbolAndFreq, minSize *byte, maxSize *byte
 // secondPass computes the "second pass" of Huffman code assignment, which
 // involves transforming the (Symbol, codes[Symbol].Size) assignments from
 // phase one into a canonical Huffman code written back to codes[Symbol].Bits.
-func secondPass(codes []Code) {
+func secondPass(codes []Code) error {
 	// Step 1: sort the symbols by (codes[Symbol].Size, Symbol) ascending.
 
 	numSymbols := Symbol(len(codes))
 	sorted := make(bySize, 0, numSymbols)
 	for symbol := Symbol(0); symbol < numSymbols; symbol++ {
-		hc := codes[symbol]
-		if hc.Size == 0 {
+		size := codes[symbol].Size
+		if size == 0 {
 			continue
 		}
-		sorted = append(sorted, symbolAndSize{symbol, hc.Size})
+
+		// forbid codes with sizes greater than maxBitsPerCode
+		if size > maxBitsPerCode {
+			return fmt.Errorf("invalid bit length while constructing Huffman tree: got %d, max %d", size, maxBitsPerCode)
+		}
+
+		sorted = append(sorted, symbolAndSize{symbol, size})
 	}
 	sorted.Sort()
 
@@ -281,9 +429,16 @@ func secondPass(codes []Code) {
 			nextCode <<= (item.size - lastSize)
 			lastSize = item.size
 		}
-		codes[item.symbol].Bits = nextCode
+
+		mask := (uint32(1) << item.size) - 1
+		if (nextCode &^ mask) != 0 {
+			return fmt.Errorf("too many symbols have a code length of %d", item.size)
+		}
+
+		codes[item.symbol].Bits = reverseBits(item.size, nextCode)
 		nextCode++
 	}
+	return nil
 }
 
 // type symbolAndFreq + type freqHeap {{{
