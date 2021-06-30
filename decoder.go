@@ -41,18 +41,17 @@ func NewDecoder(sizes []byte) *Decoder {
 func (d *Decoder) Init(sizes []byte) error {
 	numSymbols := Symbol(len(sizes))
 
-	var countArray [maxBitsPerCode]uint32
+	tmp := make([]byte, numSymbols)
+	copy(tmp, sizes)
+	sizes = tmp
+
+	codes := make([]Code, numSymbols)
 	var numSymbolsWithNonZeroSizes uint32
 	var minSize, maxSize byte
 	for symbol := Symbol(0); symbol < numSymbols; symbol++ {
 		size := sizes[symbol]
 		if size == 0 {
 			continue
-		}
-
-		// forbid codes with sizes greater than maxBitsPerCode
-		if size > maxBitsPerCode {
-			return fmt.Errorf("invalid bit length while constructing Huffman tree: got %d, max %d", size, maxBitsPerCode)
 		}
 
 		if numSymbolsWithNonZeroSizes == 0 {
@@ -63,31 +62,17 @@ func (d *Decoder) Init(sizes []byte) error {
 		} else if maxSize < size {
 			maxSize = size
 		}
-
-		countArray[size]++
 		numSymbolsWithNonZeroSizes++
+		codes[symbol].Size = sizes[symbol]
 	}
 
-	// permit degenerate code with 0 symbols
 	if numSymbolsWithNonZeroSizes == 0 {
-		*d = Decoder{}
+		*d = Decoder{table: nil, sizes: sizes, minSize: 0, maxSize: 0}
 		return nil
 	}
 
-	var nextCodeArray [maxBitsPerCode]uint32
-	var code uint32
-	for bits := minSize; bits <= maxSize; bits++ {
-		code = (code + countArray[bits-1]) << 1
-		nextCodeArray[bits] = code
-	}
-	code += countArray[maxSize]
-
-	// permit degenerate code with 1 symbol
-	// forbid all other degenerate codes
-	if code == 1 && maxSize == 1 {
-		// pass
-	} else if code != (1 << maxSize) {
-		return fmt.Errorf("degenerate Huffman tree: expected %d, got %d", (1 << maxSize), code)
+	if err := secondPass(codes); err != nil {
+		return err
 	}
 
 	// len(table) is approximately n×log2(n) when filled.
@@ -95,7 +80,7 @@ func (d *Decoder) Init(sizes []byte) error {
 
 	*d = Decoder{
 		table:   make(map[Code]decoderData, numTableSlots),
-		sizes:   make([]byte, numSymbols),
+		sizes:   sizes,
 		minSize: minSize,
 		maxSize: maxSize,
 	}
@@ -103,15 +88,11 @@ func (d *Decoder) Init(sizes []byte) error {
 	copy(d.sizes, sizes)
 
 	for symbol := Symbol(0); symbol < numSymbols; symbol++ {
-		size := sizes[symbol]
-		if size == 0 {
+		hc := codes[symbol]
+		if hc.Size == 0 {
 			continue
 		}
 
-		code := nextCodeArray[size]
-		nextCodeArray[size]++
-
-		hc := MakeReversedCode(size, code)
 		fillTable(d.table, symbol, hc)
 	}
 
